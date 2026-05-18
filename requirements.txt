@@ -1,0 +1,10 @@
+numpy
+torch
+gymnasium
+shimmy
+stable-baselines3[extra]
+pyflyt>=0.29.0
+pybullet>=3.2.5
+pettingzoo>=1.24.0
+pandas
+matplotlib

@@ -1,0 +1,323 @@
+\documentclass[11pt,a4paper]{article}
+
+% ---- Packages ----
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{listings}
+\usepackage{tabularx}
+\usepackage{float}
+
+% ---- Colors ----
+\definecolor{pts}{RGB}{180,60,60}
+
+% ---- Code listings ----
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\bfseries,
+  commentstyle=\color{gray}\itshape,
+  stringstyle=\color{green!40!black},
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{gray!50},
+  backgroundcolor=\color{gray!5},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  tabsize=4,
+}
+
+% ---- Header/Footer ----
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small INFO8003 -- Reinforcement Learning}
+\fancyhead[R]{\small Project 2025--2026}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ---- Section formatting ----
+\titleformat{\section}{\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{1em}{}
+
+% ---- Hyperlinks ----
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  urlcolor=blue!60!black,
+  citecolor=black,
+}
+
+% ---- Points macro ----
+\newcommand{\pts}[1]{\hfill{\normalfont\normalsize\color{pts} [#1/20]}}
+
+\begin{document}
+
+% ====================================================================
+% TITLE PAGE
+% ====================================================================
+\begin{titlepage}
+\centering
+\vspace*{3cm}
+
+{\Huge\bfseries Reinforcement Learning Project}\\[0.8cm]
+{\LARGE UAV Control via Deep Reinforcement Learning}\\[0.5cm]
+{\Large PyFlyt Simulator}\\[2cm]
+
+\begin{tabular}{ll}
+\toprule
+\textbf{Course}     & INFO8003 -- Reinforcement Learning \\
+\textbf{Groups}     & 2 students \\
+\textbf{Simulator}  & PyFlyt v0.29+ \cite{tai2023pyflyt} \\
+\bottomrule
+\end{tabular}
+
+\vspace{2cm}
+\textit{Train, evaluate, and compare deep RL agents for drone control.\\
+Compete in a dogfight tournament.}
+
+\vfill
+{\large Academic Year 2025--2026}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% ====================================================================
+% LLM POLICY
+% ====================================================================
+\section*{Use of LLMs}
+
+You may use large language models (ChatGPT, Claude, Copilot, etc.) to help write code. However:
+\begin{itemize}[nosep]
+  \item You \textbf{must understand every line of code} you submit.
+  \item \textbf{Questions will be asked} at the oral presentation and the exam. You must be able to explain your implementation, your training pipeline, and the algorithms you used.
+  \item If you cannot explain your code, it will be considered as not done.
+\end{itemize}
+
+% ====================================================================
+% 1. ENVIRONMENTS & MDP FORMALIZATION
+% ====================================================================
+\section{Environments \& MDP Formalization\pts{3}}
+\label{sec:environments}
+
+All environments use PyFlyt \cite{tai2023pyflyt}, a Gymnasium-compatible UAV simulator built on PyBullet. They follow the standard Gymnasium API:
+
+\begin{lstlisting}[language=Python, numbers=none]
+import gymnasium
+env = gymnasium.make("PyFlyt/QuadX-Hover-v4", flight_mode=0)
+obs, info = env.reset(seed=42)        # obs: np.ndarray
+action = env.action_space.sample()    # action: np.ndarray(4,) in [-1, 1]
+obs, reward, terminated, truncated, info = env.step(action)
+env.close()
+\end{lstlisting}
+
+Any RL library that works with Gymnasium can be used. The 4D continuous action space is shared across all environments; its meaning depends on the \texttt{flight\_mode}.
+
+In your report, \textbf{formalize each environment as an MDP}. Explore the environments in code to understand what the observations and rewards look like.
+
+\subsection{Flight Modes}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{clXl}
+\toprule
+\textbf{Mode} & \textbf{Action semantics} & \textbf{Description} & \textbf{Difficulty} \\
+\midrule
+$-1$ & $(m_1, m_2, m_3, m_4)$ & Direct motor PWM & Hardest \\
+$0$  & $(\dot{p}, \dot{q}, \dot{r}, T)$ & Angular velocity + thrust & Hard \\
+$4$  & $(u, v, \dot{r}, z)$ & Body-frame velocity + yaw rate + height & Medium \\
+$6$  & $(\dot{x}, \dot{y}, \dot{r}, \dot{z})$ & Ground velocity + yaw rate + vertical vel. & Easy \\
+$7$  & $(x, y, r, z)$ & Position + yaw + height (full PID) & Easiest \\
+\bottomrule
+\end{tabularx}
+\caption{Selected flight modes. Higher modes abstract away low-level control via cascaded PID controllers.}
+\label{tab:flight_modes}
+\end{table}
+
+\subsection{QuadX-Hover-v4 (Stabilization)}
+
+Maintain a quadrotor at a fixed target position with stable orientation.
+
+\subsection{QuadX-Waypoints-v4 (Navigation)}
+
+Navigate through randomly placed 3D waypoints. The default PyFlyt parameters are very restrictive. The provided code overrides them in \texttt{env\_config.py}. Read and understand those overrides.
+
+\begin{lstlisting}[language=Python, numbers=none]
+env = gymnasium.make("PyFlyt/QuadX-Waypoints-v4", flight_mode=6,
+    goal_reach_distance=4.0, flight_dome_size=150.0,
+    max_duration_seconds=120.0, num_targets=4)
+\end{lstlisting}
+
+This environment returns a \texttt{Dict} observation space. Most RL libraries need a flat vector. The provided \texttt{FlattenWaypointEnv} wrapper handles this.
+
+\subsection{Dogfight -- MAFixedwingDogfightEnvV2}
+
+1v1 fixed-wing aerial combat. This is a multi-agent environment (PettingZoo). The provided \texttt{DogfightSelfPlayEnv} wrapper turns it into a single-agent Gymnasium environment for training.
+
+% ====================================================================
+% 2. ALGORITHMS
+% ====================================================================
+\section{Algorithms}
+\label{sec:algorithms}
+
+You may use \textbf{any RL algorithm} and \textbf{any library}. You must train and compare \textbf{at least two algorithms}.
+
+In your report, describe each algorithm: its main idea, key properties (on-policy vs off-policy, exploration mechanism, etc.), and why you chose it. Explain things in your own words.
+
+Your trained model must expose the following interface (used by the evaluation scripts and the tournament):
+
+\begin{lstlisting}[language=Python, numbers=none]
+action, info = model.predict(obs, deterministic=True)
+# obs:    np.ndarray  -- observation from the environment
+# action: np.ndarray  -- action to take (shape depends on env)
+# info:   any         -- optional extra info (can be {})
+\end{lstlisting}
+
+% ====================================================================
+% 3. EXPERIMENTAL PROTOCOL
+% ====================================================================
+\section{Experiments \& Results\pts{4}}
+\label{sec:protocol}
+
+I encourage to log your runs to \href{https://wandb.ai}{Weights \& Biases}: episode reward, evaluation reward (deterministic policy), and policy videos.
+
+Use appropriate statistical tools to compare your algorithms. Do not draw big conclusions on a single run of training. The quality of your evaluation matters.
+
+\textit{Hint}: Agarwal et al.\ \cite{agarwal2021rliable} discuss best practices for statistical evaluation in deep RL. Worth reading.
+
+% ====================================================================
+% 4. ANALYSIS & DISCUSSION
+% ====================================================================
+\section{Analysis \& Discussion\pts{5}}
+\label{sec:analysis}
+
+This section carries the most weight. We care more about your understanding than about high scores. Your report should cover:
+
+\begin{itemize}[nosep]
+  \item Why does one algorithm work better than the other on a given environment?
+  \item Effect of flight mode on waypoint performance: why is mode 0 harder than mode 6?
+  \item Failure analysis: what causes crashes, reward plateaus, or policy collapse?
+  \item What would you do differently with more compute?
+\end{itemize}
+
+% ====================================================================
+% 5. IMPLEMENTATION
+% ====================================================================
+\section{Implementation\pts{4}}
+\label{sec:implementation}
+
+\begin{itemize}[nosep]
+  \item Clean, readable code with \texttt{requirements.txt} and \texttt{README.md}.
+  \item Proper use of Weights \& Biases for experiment tracking.
+  \item Reproducible results: seeded experiments, documented hyperparameters.
+  \item Any RL library is fine, implementing your own algorithm or exploring an algorithm proposed in papers is encouraged and rewarded.
+\end{itemize}
+
+% ====================================================================
+% 6. DOGFIGHT TOURNAMENT
+% ====================================================================
+\section{Dogfight Tournament\pts{2}}
+\label{sec:tournament}
+
+\subsection{Rules}
+
+Each group may submit \textbf{as many relevant agents as they want}. Test them before submitting. Motivate how you want to obtain the best agent and what you have done.
+
+The tournament environment is fixed:
+\begin{lstlisting}[language=Python, numbers=none]
+MAFixedwingDogfightEnvV2(
+    team_size=1, assisted_flight=True,
+    flatten_observation=True, max_duration_seconds=60, agent_hz=30,
+)
+\end{lstlisting}
+
+\subsection{Submission Format}
+
+Submit Python files named \texttt{groupXX\_name.py} (e.g., \texttt{group03\_aggressive.py}) with a \texttt{load\_model()} function. The only requirement is the \texttt{predict()} interface. See \texttt{scripts/submission\_template.py}.
+
+\subsection{Scoring}
+
+Agents play a round-robin tournament, Elo-rated. Ranking bonus: top-3 (+1pt), top-5 (+0.5pt), based on your best agent only.
+
+\subsection{Leaderboard}
+
+A live leaderboard will be made available in the coming weeks. You will be able to submit agents and track your ranking before the final deadline.
+
+% ====================================================================
+% 7. BONUS / INNOVATION
+% ====================================================================
+\section{Bonus / Innovation\pts{2}}
+\label{sec:bonus}
+
+Extra credit for going beyond the required experiments: hyperparameter ablation, reward shaping, curriculum learning, architecture exploration, additional algorithms, etc.
+
+% ====================================================================
+% 8. DELIVERABLES
+% ====================================================================
+\section{Deliverables}
+\label{sec:deliverables}
+
+You are expected to submit a complete zipped file with the following on the Montefiore submission platform before the \textbf{12th May}.
+\begin{enumerate}[nosep]
+  \item \textbf{Code repository} (Git): training scripts, wrappers, analysis. Include \texttt{requirements.txt} and \texttt{README.md}.
+  \item \textbf{Report} (PDF): MDP formalization, algorithm description, experimental setup, results with statistical analysis, flight mode comparison, dogfight strategy, discussion, conclusion.
+  \item \textbf{Wandb project link (optional but recommended)}: public or shared.
+  \item \textbf{Trained models}: best checkpoints per (algorithm, environment) pair.
+  \item \textbf{Tournament submissions}: \texttt{groupXX\_name.py} files.
+\end{enumerate}
+
+% ====================================================================
+% 9. PROVIDED CODE
+% ====================================================================
+\section{Provided Code}
+\label{sec:starter}
+
+The repository contains environment configuration and evaluation scripts.
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Script} & \textbf{Purpose} \\
+\midrule
+\texttt{scripts/env\_config.py} & Environment parameters (waypoint overrides) \\
+\texttt{scripts/wrappers.py} & \texttt{FlattenWaypointEnv}: flattens dict observations to a fixed-size vector \\
+\texttt{scripts/dogfight\_wrapper.py} & \texttt{DogfightSelfPlayEnv}: wraps multi-agent dogfight as single-agent Gymnasium env \\
+\texttt{scripts/evaluate.py} & Evaluate any model (\texttt{.py} module or \texttt{.zip} checkpoint) \\
+\texttt{scripts/tournament.py} & Dogfight tournament (used for grading) \\
+\texttt{scripts/submission\_template.py} & Tournament submission template \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\texttt{evaluate.py} and \texttt{tournament.py} are what we use to grade your work. Make sure your models run correctly with them before submitting.
+
+% ====================================================================
+% REFERENCES
+% ====================================================================
+\newpage
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+
+\bibitem{tai2023pyflyt}
+Tai, J.~J. et al. (2023).
+\textit{PyFlyt -- UAV Simulation Environments for Reinforcement Learning Research}.
+arXiv:2304.01305.
+
+\bibitem{agarwal2021rliable}
+Agarwal, R. et al. (2021).
+\textit{Deep Reinforcement Learning at the Edge of the Statistical Precipice}.
+NeurIPS 2021.
+
+\end{thebibliography}
+
+\end{document}
